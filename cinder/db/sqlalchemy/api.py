@@ -19,6 +19,8 @@
 """Implementation of SQLAlchemy backend."""
 
 
+from datetime import datetime
+from datetime import timedelta
 import functools
 import sys
 import threading
@@ -34,9 +36,11 @@ from oslo.utils import timeutils
 import osprofiler.sqlalchemy
 import six
 import sqlalchemy
+from sqlalchemy import MetaData
 from sqlalchemy import or_
 from sqlalchemy.orm import joinedload, joinedload_all
 from sqlalchemy.orm import RelationshipProperty
+from sqlalchemy.schema import Table
 from sqlalchemy.sql.expression import literal_column
 from sqlalchemy.sql.expression import true
 from sqlalchemy.sql import func
@@ -44,7 +48,7 @@ from sqlalchemy.sql import func
 from cinder.common import sqlalchemyutils
 from cinder.db.sqlalchemy import models
 from cinder import exception
-from cinder.i18n import _, _LW
+from cinder.i18n import _, _LW, _LE, _LI
 from cinder.openstack.common import log as logging
 from cinder.openstack.common import uuidutils
 
@@ -3285,3 +3289,39 @@ def cgsnapshot_destroy(context, cgsnapshot_id):
                     'deleted': True,
                     'deleted_at': timeutils.utcnow(),
                     'updated_at': literal_column('updated_at')})
+
+
+@require_admin_context
+def purge_deleted_rows(context, age=None):
+    """Purge deleted rows older than age from cinder tables."""
+
+    engine = get_engine()
+    conn = engine.connect()
+    metadata = MetaData()
+    metadata.bind = engine
+    tables = []
+
+    for model_class in models.__dict__.itervalues():
+        if hasattr(model_class, "__tablename__"):
+            tables.append(model_class.__tablename__)
+
+    # Reorder the list so the volumes table is last to avoid FK constraints
+    tables.remove("volumes")
+    tables.append("volumes")
+    for table in tables:
+        t = Table(table, metadata, autoload=True)
+        LOG.info(_LI('Purging deleted rows older than age=%(age)s days '
+                     'from table=%(table)s'), {'age': age, 'table': table})
+        deleted_age = datetime.now() - timedelta(days=age)
+        try:
+            with conn.begin():
+                result_delete = conn.execute(
+                    t.delete()
+                    .where(t.c.deleted_at < deleted_age))
+        except db_exc.DBError:
+            LOG.exception(_LE('DBError detected when purging from '
+                              'table=%(table)s') % {'table': table})
+
+        rows_purged = result_delete.rowcount
+        LOG.info(_LI("Deleted %(row)s rows from table=%(table)s"),
+                 {'row': rows_purged, 'table': table})
