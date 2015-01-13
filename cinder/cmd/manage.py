@@ -228,6 +228,20 @@ class DbCommands(object):
                                    db_migration.MIGRATE_REPO_PATH,
                                    db_migration.INIT_VERSION))
 
+    @args('age', nargs='?', default=None,
+            help='Number of days deleted to purge')
+    def purge_deleted_rows(self, age):
+        """Purge deleted rows older than a given age from cinder tables."""
+        if age is not None:
+            age = int(age)
+            if age < 0:
+                print(_("Must supply a positive value for age"))
+                return(1)
+        else:
+            print(_("Missing age value"))
+            return(1)
+        ctxt = context.get_admin_context()
+        db.purge_deleted_rows(ctxt, age)
 
 class VersionCommands(object):
     """Class for exposing the codebase version."""

@@ -34,12 +34,14 @@ from oslo.utils import timeutils
 import osprofiler.sqlalchemy
 import six
 import sqlalchemy
+from sqlalchemy import MetaData
 from sqlalchemy import or_
 from sqlalchemy.orm import joinedload, joinedload_all
 from sqlalchemy.orm import RelationshipProperty
 from sqlalchemy.sql.expression import literal_column
 from sqlalchemy.sql.expression import true
 from sqlalchemy.sql import func
+from sqlalchemy.schema import Table
 
 from cinder.common import sqlalchemyutils
 from cinder.db.sqlalchemy import models
@@ -3285,3 +3287,41 @@ def cgsnapshot_destroy(context, cgsnapshot_id):
                     'deleted': True,
                     'deleted_at': timeutils.utcnow(),
                     'updated_at': literal_column('updated_at')})
+
+@require_admin_context
+def purge_deleted_rows(context, age=None):
+    """Purge deleted rows older than age from cinder tables."""
+    from datetime import datetime, timedelta
+
+    engine = get_engine()
+    session = get_session()
+    conn = engine.connect()
+    metadata = MetaData()
+    metadata.bind = engine
+    tables = []
+
+    for model_class in models.__dict__.itervalues():
+        if hasattr(model_class, "__tablename__"):
+            tables.append(model_class.__tablename__)
+            
+    # Reorder the list so that the volumes table is last
+    tables.remove("volumes")
+    tables.append("volumes")
+    for table in tables:
+        t = Table(table, metadata, autoload=True)
+        msg = _("Purging deleted rows older than %s days from %s") % (age, table)
+        LOG.info(msg)
+        default_deleted_value = "0"
+        deleted_age = datetime.now() - timedelta(days=age)
+        try:
+            with conn.begin():
+                result_delete = conn.execute(t.delete().where(t.c.deleted_at < deleted_age))
+        except db_exc.DBError:
+            msg = _("IntegrityError detected when purging from table %s") % table
+            LOG.info(msg)
+
+        rows_purged = result_delete.rowcount
+        msg = _("Deleted %s rows from table %s") % (rows_purged, table)
+        LOG.info(msg)
+
+        
